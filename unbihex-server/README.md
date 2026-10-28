@@ -28,7 +28,7 @@
 ```text
 unbihex run -c <config.json | stdin:>   запуск; останавливается по Ctrl-C и SIGTERM
 unbihex -c <config.json> [-test]         то же без `run`, как у Xray; -test только проверяет конфиг
-unbihex version                          «Unbihex 0.1.0 (…)»; под именем xray* — «Xray 26.10.21 (Unbihex 0.1.0) …»,
+unbihex version                          «Unbihex 0.1.1 (…)»; под именем xray* — «Xray 26.10.21 (Unbihex 0.1.1) …»,
                                          как ждут панели, когда Unbihex стоит на месте Xray
 unbihex uuid [-i текст]                  случайный UUID или UUIDv5 из текста, как у Xray
 unbihex x25519 [-i ключ]                 пара ключей REALITY (base64url) или публичный ключ к приватному
@@ -46,7 +46,8 @@ unbihex api <команда> [-s адрес]         вызов gRPC API зап�
 cargo build --release
 cargo test
 ```
-Бинарник: `target/release/unbihex`. Тесты гоняют наш клиент против нашего сервера на loopback:
+Бинарник: `target/release/unbihex`. Готовые статические бинарники для Linux (x86_64 и aarch64) — в [релизах](https://github.com/crystalmasta/unbihex/releases/latest); из Windows их собирает `cargo zigbuild --release --target x86_64-unknown-linux-musl`.
+Тесты гоняют наш клиент против нашего сервера на loopback:
 TLS и Vision, UDP, XUDP, Mux с несколькими сессиями, отказ чужим пользователям; REALITY с Vision и
 отпечатком Chrome, фрагментированный ClientHello, и что видят чужие: настоящий сайт по TLS и по HTTP;
 gRPC API — счётчики трафика, пользователи на лету и команда `unbihex api`; бинарник на конфиге

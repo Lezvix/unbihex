@@ -1,7 +1,7 @@
 [package]
 name = "unbihex-server"
 description = "Unbihex server: the engine as a standalone process (VLESS inbound, Xray-like CLI)"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MPL-2.0"

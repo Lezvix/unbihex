@@ -29,7 +29,7 @@ process, the CLI and the tests.
 ```text
 unbihex run -c <config.json | stdin:>   run; stops on Ctrl-C and SIGTERM
 unbihex -c <config.json> [-test]         the same without `run`, as with Xray; -test only checks the config
-unbihex version                          "Unbihex 0.1.0 (…)"; named xray*, "Xray 26.10.21 (Unbihex 0.1.0) …",
+unbihex version                          "Unbihex 0.1.1 (…)"; named xray*, "Xray 26.10.21 (Unbihex 0.1.1) …",
                                          as panels expect when Unbihex stands in Xray's place
 unbihex uuid [-i text]                   a random UUID, or Xray's UUIDv5 of the text
 unbihex x25519 [-i key]                  a REALITY key pair (base64url), or the public key of a private one
@@ -47,7 +47,8 @@ The log level comes from `log.level` or the `RUST_LOG` variable.
 cargo build --release
 cargo test
 ```
-The binary is `target/release/unbihex`. The tests run our client against our server on loopback:
+The binary is `target/release/unbihex`. Static Linux binaries (x86_64 and aarch64) are in the [releases](https://github.com/crystalmasta/unbihex/releases/latest); from Windows, `cargo zigbuild --release --target x86_64-unknown-linux-musl` builds them.
+The tests run our client against our server on loopback:
 TLS and Vision, UDP, XUDP, Mux with several sessions, refusing unknown users; REALITY with Vision and the
 Chrome fingerprint, a fragmented ClientHello, and what strangers see: the real site over TLS and HTTP;
 the gRPC API: traffic counters, live users and the `unbihex api` command; the binary on a Marzban- and
