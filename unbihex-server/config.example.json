@@ -19,5 +19,11 @@
   "outbounds": [
     { "type": "direct", "tag": "direct" },
     { "type": "block", "tag": "block" }
-  ]
+  ],
+  "route": {
+    "rules": [
+      { "ip_private": true, "outbound": "block" }
+    ],
+    "final": "direct"
+  }
 }

@@ -10,13 +10,18 @@
 //! (scanners, browsers, a censor's probes) is spliced to `dest` together with the
 //! bytes read so far, and talks to the real site.
 //!
-//! Not done yet: Xray also dials `dest` for authenticated clients to copy the sizes of
-//! its handshake records; ours have rustls's sizes.
+//! A ClientHello is accepted once: the client's clock must be within `max_time_diff`
+//! of ours (2 minutes unless set), and the randoms seen in that window are remembered,
+//! so a recorded hello replayed by a prober is spliced to `dest` like any stranger.
+//!
+//! For our clients the server also asks `dest` how it answers the same hello and
+//! copies its key exchange group, cipher suite and handshake record sizes
+//! (`reality_shape.rs`), so the handshake looks like `dest`'s on the wire.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::AtomicU64;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -32,6 +37,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use super::reality_shape::{self, DestShape, SecretLog};
 use crate::config::{ServerRealityConfig, parse_short_id, parse_x25519_key};
 use crate::error::{Error, Result};
 use crate::outbound::pq::X25519_MLKEM768;
@@ -43,19 +49,24 @@ const SID_OFFSET: usize = 39;
 const MAX_HELLO: usize = 64 * 1024;
 const DEST_CONNECT: Duration = Duration::from_secs(5);
 const FALLBACK_IDLE: Duration = Duration::from_secs(300);
+/// The clock window when the config gives none (Xray's 0 means no check; ours does not,
+/// since without it a recorded hello could be replayed forever).
+const DEFAULT_TIME_DIFF: Duration = Duration::from_secs(120);
+/// At most this many remembered randoms; only authenticated hellos are remembered.
+const REPLAY_CAP: usize = 1 << 20;
 
 /// A configured REALITY server.
 pub struct RealityServer {
     private: StaticSecret,
     server_names: HashSet<String>,
     short_ids: HashSet<[u8; 8]>,
-    max_time_diff: Option<Duration>,
+    max_time_diff: Duration,
+    seen: Mutex<Seen>,
     dest: String,
     key: Arc<dyn SigningKey>,
     public: [u8; 32],
     /// The certificate with a zero signature; the last 64 bytes get the HMAC.
     cert: Vec<u8>,
-    base: ServerConfig,
 }
 
 /// The outcome of reading a ClientHello.
@@ -95,16 +106,7 @@ impl RealityServer {
             .and_then(|k| k.try_into().ok())
             .ok_or_else(|| Error::config("reality: ed25519 public key"))?;
 
-        let mut provider = rustls::crypto::ring::default_provider();
-        provider.kx_groups.insert(0, &X25519_MLKEM768);
-        let mut base = ServerConfig::builder_with_provider(Arc::new(provider))
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|e| Error::config(format!("reality: {e}")))?
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(OneCert(None)));
-        // As Xray's REALITY: no tickets, no ALPN, an uncompressed certificate.
-        base.send_tls13_tickets = 0;
-        base.cert_compressors = Vec::new();
+        tls_config(None, None)?;
         Ok(RealityServer {
             private,
             server_names: cfg
@@ -114,13 +116,15 @@ impl RealityServer {
                 .filter(|n| !n.is_empty())
                 .collect(),
             short_ids,
-            max_time_diff: (cfg.max_time_diff_ms > 0)
-                .then(|| Duration::from_millis(cfg.max_time_diff_ms)),
+            max_time_diff: match cfg.max_time_diff_ms {
+                0 => DEFAULT_TIME_DIFF,
+                ms => Duration::from_millis(ms),
+            },
+            seen: Mutex::new(Seen::default()),
             dest: cfg.dest.clone(),
             cert: template_cert(&public),
             key: Arc::new(Ed25519Always(key)),
             public,
-            base,
         })
     }
 
@@ -140,9 +144,35 @@ impl RealityServer {
             }
             None => return Ok(Handshake::Fallback(tcp, prefix)),
         };
-        let conn = ServerConnection::new(self.config_for(&auth_key))
-            .map_err(|e| Error::Tls(e.to_string()))?;
-        let tls = TlsRecordStream::accept_prefixed(tcp, conn, &prefix).await?;
+        let shape = reality_shape::probe(&self.dest, &prefix).await;
+        if shape.is_none() {
+            tracing::debug!(
+                "reality: no answer from {}, handshake sizes are ours",
+                self.dest
+            );
+        }
+        let log = Arc::new(SecretLog::default());
+        let config = self.config_for(&auth_key, shape.as_ref(), log.clone())?;
+        let mut conn = ServerConnection::new(config).map_err(|e| Error::Tls(e.to_string()))?;
+        let mut rest = &prefix[..];
+        while !rest.is_empty() && conn.read_tls(&mut rest)? > 0 {
+            conn.process_new_packets()
+                .map_err(|e| Error::Tls(e.to_string()))?;
+        }
+        // rustls's first flight, re-framed like dest's when we know its sizes.
+        let mut flight = Vec::new();
+        while conn.wants_write() {
+            conn.write_tls(&mut flight)?;
+        }
+        let shaped = match (&shape, log.secret(), conn.negotiated_cipher_suite()) {
+            (Some(s), Some(secret), Some(cs)) => {
+                reality_shape::reshape(&flight, u16::from(cs.suite()), &secret, &s.records)
+            }
+            _ => None,
+        };
+        tcp.write_all(shaped.as_deref().unwrap_or(&flight)).await?;
+        let mut tls = TlsRecordStream::new(tcp, conn);
+        tls.handshake().await?;
         Ok(Handshake::Done(Box::new(tls)))
     }
 
@@ -200,21 +230,44 @@ impl RealityServer {
         if !self.short_ids.contains(&short_id) {
             return Err("short ID not in short_ids");
         }
-        if let Some(max) = self.max_time_diff {
-            let theirs = u64::from(u32::from_be_bytes([plain[4], plain[5], plain[6], plain[7]]));
-            let ours = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if Duration::from_secs(ours.abs_diff(theirs)) > max {
-                return Err("client clock out of max_time_diff_ms");
-            }
+        let theirs = u64::from(u32::from_be_bytes([plain[4], plain[5], plain[6], plain[7]]));
+        let ours = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if Duration::from_secs(ours.abs_diff(theirs)) > self.max_time_diff {
+            // The key and short ID were right: our client with a wrong clock, or a
+            // replay of an old hello. Say so above debug, or it looks like a dead server.
+            tracing::info!(
+                "reality: a client's clock is {} s off ours (allowed {} s); sending it to dest",
+                ours.abs_diff(theirs),
+                self.max_time_diff.as_secs()
+            );
+            return Err("client clock out of max_time_diff_ms");
+        }
+        // A hello stays acceptable while its time is within the window on either side,
+        // so it is remembered for twice the window (plus a second of rounding).
+        let keep = self.max_time_diff * 2 + Duration::from_secs(1);
+        if !self
+            .seen
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .first_time(h.random, keep)
+        {
+            tracing::info!("reality: a replayed ClientHello; sending it to dest");
+            return Err("replayed ClientHello");
         }
         Ok(auth_key)
     }
 
-    /// A TLS config whose certificate proves `auth_key`.
-    fn config_for(&self, auth_key: &[u8; 32]) -> Arc<ServerConfig> {
+    /// A TLS config whose certificate proves `auth_key`, answering with `dest`'s
+    /// group and cipher suite when known; `log` receives the handshake secret.
+    fn config_for(
+        &self,
+        auth_key: &[u8; 32],
+        shape: Option<&DestShape>,
+        log: Arc<SecretLog>,
+    ) -> Result<Arc<ServerConfig>> {
         let mut cert = self.cert.clone();
         let at = cert.len() - 64;
         // HMAC accepts any key length.
@@ -222,12 +275,69 @@ impl RealityServer {
             mac.update(&self.public);
             cert[at..].copy_from_slice(&mac.finalize().into_bytes());
         }
-        let mut cfg = self.base.clone();
+        let mut cfg = tls_config(shape.map(|s| s.group), shape.map(|s| s.suite))?;
         cfg.cert_resolver = Arc::new(OneCert(Some(Arc::new(CertifiedKey::new(
             vec![CertificateDer::from(cert)],
             self.key.clone(),
         )))));
-        Arc::new(cfg)
+        cfg.key_log = log;
+        Ok(Arc::new(cfg))
+    }
+}
+
+/// TLS 1.3 server settings, limited to `group` and `suite` when we support them.
+fn tls_config(group: Option<u16>, suite: Option<u16>) -> Result<ServerConfig> {
+    let mut provider = rustls::crypto::ring::default_provider();
+    provider.kx_groups.insert(0, &X25519_MLKEM768);
+    if let Some(g) = group.filter(|&g| provider.kx_groups.iter().any(|k| u16::from(k.name()) == g))
+    {
+        provider.kx_groups.retain(|k| u16::from(k.name()) == g);
+    }
+    provider.cipher_suites.retain(|cs| cs.tls13().is_some());
+    if let Some(s) = suite.filter(|&s| {
+        provider
+            .cipher_suites
+            .iter()
+            .any(|cs| u16::from(cs.suite()) == s)
+    }) {
+        provider
+            .cipher_suites
+            .retain(|cs| u16::from(cs.suite()) == s);
+    }
+    let mut cfg = ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| Error::config(format!("reality: {e}")))?
+        .with_no_client_auth()
+        .with_cert_resolver(Arc::new(OneCert(None)));
+    // As Xray's REALITY: no tickets, no ALPN, an uncompressed certificate.
+    cfg.send_tls13_tickets = 0;
+    cfg.cert_compressors = Vec::new();
+    Ok(cfg)
+}
+
+/// Client randoms of accepted hellos, oldest first.
+#[derive(Default)]
+struct Seen {
+    set: HashSet<[u8; 32]>,
+    order: VecDeque<(Instant, [u8; 32])>,
+}
+
+impl Seen {
+    /// Remembers `random` for `keep`; false if it is already remembered.
+    fn first_time(&mut self, random: [u8; 32], keep: Duration) -> bool {
+        let now = Instant::now();
+        while let Some(&(at, r)) = self.order.front() {
+            if now.duration_since(at) < keep && self.order.len() < REPLAY_CAP {
+                break;
+            }
+            self.order.pop_front();
+            self.set.remove(&r);
+        }
+        if !self.set.insert(random) {
+            return false;
+        }
+        self.order.push_back((now, random));
+        true
     }
 }
 
@@ -473,6 +583,19 @@ mod tests {
         assert!(matches!(scan(b"GET / HTTP/1.1\r\n"), Scan::NotHello));
         assert!(matches!(scan(&record(&[2, 0, 0, 0])), Scan::NotHello));
         assert!(matches!(scan(&[0x16, 3, 1, 0, 0]), Scan::NotHello));
+    }
+
+    #[test]
+    fn replayed_randoms_are_refused() {
+        let mut seen = Seen::default();
+        let keep = Duration::from_secs(60);
+        assert!(seen.first_time([1; 32], keep));
+        assert!(seen.first_time([2; 32], keep));
+        assert!(!seen.first_time([1; 32], keep));
+        // Past `keep` a random is forgotten (the clock check refuses it by then).
+        assert!(seen.first_time([3; 32], Duration::ZERO));
+        assert!(seen.first_time([1; 32], keep));
+        assert_eq!(seen.order.len(), seen.set.len());
     }
 
     #[test]

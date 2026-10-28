@@ -197,6 +197,8 @@ fn run(args: &[String]) -> Result<(), String> {
 
 /// The engine config, the API and what the config asked for that is left out.
 fn parse_config(text: &str) -> Result<(Config, Option<ApiConfig>, Vec<String>), String> {
+    // Windows PowerShell 5.1 writes files with a UTF-8 BOM.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut json: serde_json::Value =
         serde_json::from_str(text).map_err(|e| format!("config: {e}"))?;
     if xray_config::looks_like_xray(&json) {

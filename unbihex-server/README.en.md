@@ -9,14 +9,15 @@ process, the CLI and the tests.
 ## What it does
 - VLESS over TLS (certificate from PEM files), X25519MLKEM768 on the server side.
 - REALITY: our clients are recognised by the key inside the ClientHello; everyone else is passed through to
-  the real site (`dest`) untouched, so a scanner or a browser sees that site.
+  the real site (`dest`) untouched, so a scanner or a browser sees that site. Our clients' handshake records
+  copy the sizes of `dest`'s answer (as in Xray); a replayed hello goes to `dest`; the clock window is 120 s by default.
 - XTLS Vision (`flow: xtls-rprx-vision`) with Xray's rules: a Vision user must use it.
 - UDP: the VLESS UDP command and Mux.Cool / XUDP (Vision users' UDP, full cone from Xray clients).
 - Routing, DNS and outbounds: everything the engine has.
 
 - Xray's gRPC API: StatsService (counters `user>>>email>>>traffic>>>uplink/downlink` and `inbound>>>…`)
   and HandlerService (adding and removing VLESS users without a restart). Turned on by
-  `"api": {"listen": "127.0.0.1:10085"}` in the config; adding inbounds and outbounds through the API is not supported yet.
+  `"api": {"listen": "127.0.0.1:10085"}` (loopback only: the API has no authentication) in the config; adding inbounds and outbounds through the API is not supported yet.
 - Xray JSON configs — the subset Marzban, 3x-ui and PasarGuard generate: VLESS over TCP with TLS or
   REALITY, the API inbound (`dokodemo-door`), `freedom` and `blackhole` outbounds, routing rules
   (inboundTag, domain, ip, port, network, geosite/geoip), policy timeouts, DNS servers by IP. Whatever would

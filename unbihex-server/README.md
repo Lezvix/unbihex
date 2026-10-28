@@ -8,14 +8,15 @@
 ## Что умеет
 - VLESS поверх TLS (сертификат из PEM-файлов), X25519MLKEM768 на стороне сервера.
 - REALITY: свой клиент проверяется по ключу в ClientHello, всех остальных сервер прозрачно пропускает
-  на настоящий сайт (`dest`) — сканер или браузер видят именно его.
+  на настоящий сайт (`dest`) — сканер или браузер видят именно его. Записи рукопожатия своего клиента
+  повторяют размеры ответа `dest` (как у Xray); повторённое приветствие уходит на `dest`, окно часов — 120 с по умолчанию.
 - XTLS Vision (`flow: xtls-rprx-vision`) с правилами Xray: пользователь с Vision обязан его использовать.
 - UDP: команда UDP VLESS и Mux.Cool / XUDP (UDP Vision-пользователей, Full Cone клиентов Xray).
 - Маршрутизация, DNS и outbound'ы — всё, что умеет ядро.
 
 - gRPC API как у Xray: StatsService (счётчики `user>>>email>>>traffic>>>uplink/downlink` и `inbound>>>…`)
   и HandlerService (добавление и удаление пользователей VLESS без перезапуска). Включается полем
-  `"api": {"listen": "127.0.0.1:10085"}` в конфиге; добавление inbound'ов и outbound'ов через API пока не поддерживается.
+  `"api": {"listen": "127.0.0.1:10085"}` в конфиге (только loopback: у API нет аутентификации); добавление inbound'ов и outbound'ов через API пока не поддерживается.
 - Конфиг Xray JSON — то подмножество, которое генерируют Marzban, 3x-ui и PasarGuard: VLESS по TCP с TLS
   или REALITY, inbound API (`dokodemo-door`), outbound'ы `freedom` и `blackhole`, правила маршрутизации
   (inboundTag, domain, ip, port, network, geosite/geoip), таймауты policy, DNS-серверы по IP. Что поменяло бы

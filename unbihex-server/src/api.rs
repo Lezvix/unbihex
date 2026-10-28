@@ -56,10 +56,17 @@ impl ApiConfig {
 
     /// Rejects services we do not have, rather than leaving them silently out.
     pub fn validate(&self) -> Result<(), String> {
-        match self.services.iter().find(|s| *s != STATS && *s != HANDLER) {
-            Some(s) => Err(format!("api: service {s:?} is not supported")),
-            None => Ok(()),
+        if let Some(s) = self.services.iter().find(|s| *s != STATS && *s != HANDLER) {
+            return Err(format!("api: service {s:?} is not supported"));
         }
+        // No authentication: on a public address anyone could add users or read them.
+        if !self.listen.ip().is_loopback() {
+            return Err(format!(
+                "api: {} is not a loopback address; the API has no authentication, listen on 127.0.0.1",
+                self.listen
+            ));
+        }
+        Ok(())
     }
 }
 

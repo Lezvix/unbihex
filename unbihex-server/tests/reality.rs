@@ -5,8 +5,8 @@
 mod common;
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -49,6 +49,9 @@ async fn site() -> Site {
     .with_no_client_auth()
     .with_single_cert(vec![cert.clone()], key)
     .unwrap();
+    // Several handshake records, like a real site's certificate chain.
+    let mut cfg = cfg;
+    cfg.max_fragment_size = Some(200);
     let cfg = Arc::new(cfg);
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -126,6 +129,16 @@ async fn server() -> Server {
 }
 
 fn client(s: &Server, user: &str, short_id: &str, fingerprint: Option<&str>) -> VlessOutbound {
+    client_at(s, s.addr, user, short_id, fingerprint)
+}
+
+fn client_at(
+    s: &Server,
+    addr: SocketAddr,
+    user: &str,
+    short_id: &str,
+    fingerprint: Option<&str>,
+) -> VlessOutbound {
     let reality = RealityClient::new(&RealityConfig {
         server_name: SITE.into(),
         public_key: s.public_key.clone(),
@@ -139,8 +152,8 @@ fn client(s: &Server, user: &str, short_id: &str, fingerprint: Option<&str>) -> 
         *uuid::Uuid::parse_str(user).unwrap().as_bytes(),
         ServerEndpoint {
             host: SITE.into(),
-            port: s.addr.port(),
-            addrs: vec![s.addr],
+            port: addr.port(),
+            addrs: vec![addr],
         },
         None,
         Default::default(),
@@ -194,10 +207,117 @@ async fn reality_with_vision_and_chrome_hello() {
         .unwrap()
         .unwrap();
     assert_eq!(&buf[..n], b"over xudp");
+    // The server asks the site once per handshake (to copy its record sizes), as Xray.
     assert_eq!(
         s.site.visits.load(Ordering::SeqCst),
-        0,
-        "our client reached the site"
+        3,
+        "the site saw more than one probe per handshake"
+    );
+    s.instance.shutdown().await;
+}
+
+/// What a passive observer between client and server sees.
+#[derive(Default)]
+struct Wire {
+    /// The client's first bytes (its ClientHello).
+    hello: Vec<u8>,
+    /// (type, length) of each record the server sent.
+    records: Vec<(u8, usize)>,
+}
+
+/// A relay to `to` for one connection that records the [`Wire`].
+async fn observer(to: SocketAddr) -> (SocketAddr, Arc<Mutex<Wire>>) {
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    let wire = Arc::new(Mutex::new(Wire::default()));
+    let w = wire.clone();
+    tokio::spawn(async move {
+        let (c, _) = l.accept().await.unwrap();
+        let s = TcpStream::connect(to).await.unwrap();
+        let (mut cr, mut cw) = c.into_split();
+        let (mut sr, mut sw) = s.into_split();
+        let up = w.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 16384];
+            while let Ok(n @ 1..) = cr.read(&mut buf).await {
+                {
+                    let mut wire = up.lock().unwrap();
+                    if wire.records.is_empty() {
+                        wire.hello.extend_from_slice(&buf[..n]);
+                    }
+                }
+                if sw.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let (mut buf, mut pos, mut chunk) = (Vec::new(), 0, [0u8; 16384]);
+        while let Ok(n @ 1..) = sr.read(&mut chunk).await {
+            buf.extend_from_slice(&chunk[..n]);
+            while let Some(h) = buf.get(pos..pos + 5) {
+                let len = usize::from(u16::from_be_bytes([h[3], h[4]]));
+                if buf.len() < pos + 5 + len {
+                    break;
+                }
+                w.lock().unwrap().records.push((h[0], len));
+                pos += 5 + len;
+            }
+            if cw.write_all(&chunk[..n]).await.is_err() {
+                break;
+            }
+        }
+    });
+    (addr, wire)
+}
+
+/// The site's first flight to `hello`: (type, length) of its records.
+async fn site_answer(site: SocketAddr, hello: &[u8]) -> Vec<(u8, usize)> {
+    let mut s = TcpStream::connect(site).await.unwrap();
+    s.write_all(hello).await.unwrap();
+    let (mut buf, mut out, mut pos) = (Vec::new(), Vec::new(), 0);
+    while let Ok(Ok(n @ 1..)) =
+        tokio::time::timeout(Duration::from_millis(500), s.read_buf(&mut buf)).await
+    {
+        let _ = n;
+        while let Some(h) = buf.get(pos..pos + 5) {
+            let len = usize::from(u16::from_be_bytes([h[3], h[4]]));
+            if buf.len() < pos + 5 + len {
+                break;
+            }
+            out.push((h[0], len));
+            pos += 5 + len;
+        }
+    }
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handshake_records_look_like_the_site() {
+    let s = server().await;
+    let echo = tcp_echo().await;
+    let (relay, wire) = observer(s.addr).await;
+    echo_through(
+        &client_at(&s, relay, PLAIN_USER, SHORT_ID, Some("chrome")),
+        echo,
+        5,
+    )
+    .await;
+    let (hello, ours) = {
+        let w = wire.lock().unwrap();
+        (w.hello.clone(), w.records.clone())
+    };
+    let site = site_answer(s.site.addr, &hello).await;
+    assert!(site.len() >= 3, "site answered {site:?}");
+    // ServerHello, ChangeCipherSpec and every encrypted handshake record match. The
+    // site signs with ECDSA, whose DER length varies by a byte or two per connection.
+    let close = site
+        .iter()
+        .zip(&ours)
+        .all(|(&(t, a), &(u, b))| t == u && a.abs_diff(b) <= 2);
+    assert!(close, "site {site:?}, ours {ours:?}");
+    assert!(
+        site.len() > 3,
+        "the site sent one handshake record: {site:?}"
     );
     s.instance.shutdown().await;
 }

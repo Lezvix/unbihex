@@ -113,6 +113,13 @@ pub fn translate(x: &Value, assets: &Path) -> Result<Translated, String> {
             route.insert("geoip".into(), json!(assets.join("geoip.dat")));
         }
     }
+    if !blocks_private(&route, &engine) {
+        t.warn(
+            "routing: no rule sends geoip:private to a blackhole, so users can reach the \
+             server's own network (cloud metadata, Docker, LAN) by IP address"
+                .into(),
+        );
+    }
     engine.insert("route".into(), Value::Object(route));
 
     if let Some(p) = top.get("policy") {
@@ -154,6 +161,24 @@ pub fn translate(x: &Value, assets: &Path) -> Result<Translated, String> {
         api,
         warnings: t.warnings,
     })
+}
+
+/// Whether a rule of the translated `route` sends private addresses to a block outbound.
+fn blocks_private(route: &Map<String, Value>, engine: &Map<String, Value>) -> bool {
+    let block_tags: Vec<&Value> = engine
+        .get("outbounds")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|o| o["type"] == "block")
+        .map(|o| &o["tag"])
+        .collect();
+    route
+        .get("rules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|r| r["ip_private"] == true && block_tags.contains(&&r["outbound"]))
 }
 
 /// Tags of the inbounds that feed the API: Xray's `api.tag` itself, or inbounds routed
@@ -338,7 +363,17 @@ impl Tr {
             format!("inbound {tag}")
         };
         let protocol = string(o, "protocol", &at)?;
+        let is_api = matches!(protocol.as_str(), "dokodemo-door" | "tunnel")
+            && !tag.is_empty()
+            && api_inbounds.contains(&tag);
         let listen = match string(o, "listen", &at)? {
+            // The API has no authentication: anyone who reaches it can add users.
+            l if l.is_empty() && is_api => {
+                self.warn(format!(
+                    "{at}: no listen, so the API listens on 127.0.0.1 (Xray would take 0.0.0.0)"
+                ));
+                "127.0.0.1".to_string()
+            }
             l if l.is_empty() => "0.0.0.0".to_string(),
             l if l.starts_with('/') || l.starts_with('@') => {
                 return Err(format!("{at}: unix socket listen {l:?} is not supported"));
@@ -358,10 +393,7 @@ impl Tr {
         } else {
             format!("{listen}:{port}")
         };
-        if matches!(protocol.as_str(), "dokodemo-door" | "tunnel")
-            && !tag.is_empty()
-            && api_inbounds.contains(&tag)
-        {
+        if is_api {
             return Ok(Inbound::Api(addr));
         }
         if protocol != "vless" {
@@ -965,6 +997,27 @@ mod tests {
     }
 
     #[test]
+    fn the_api_stays_on_loopback() {
+        let t = tr(json!({
+            "api": {"tag": "API", "services": ["StatsService"]},
+            "inbounds": [
+                {"port": 10085, "protocol": "dokodemo-door", "settings": {"address": "127.0.0.1"}, "tag": "API_IN"},
+                reality_inbound()
+            ],
+            "outbounds": [{"protocol": "freedom", "tag": "DIRECT"}],
+            "routing": {"rules": [{"inboundTag": ["API_IN"], "outboundTag": "API", "type": "field"}]}
+        }));
+        let api = t.api.unwrap();
+        assert_eq!(api.listen.to_string(), "127.0.0.1:10085");
+        assert!(t.warnings.iter().any(|w| w.contains("127.0.0.1")));
+        let public = crate::api::ApiConfig {
+            listen: "0.0.0.0:10085".parse().unwrap(),
+            ..api
+        };
+        assert!(public.validate().is_err());
+    }
+
+    #[test]
     fn a_marzban_style_config() {
         let t = tr(json!({
             "log": {"loglevel": "warning"},
@@ -1171,7 +1224,9 @@ mod tests {
         assert_eq!(t.engine["route"]["rules"][0]["geoip"], json!(["ru"]));
         assert_eq!(t.engine["route"]["rules"][0]["network"], "udp");
         assert!(t.engine["route"]["geoip"].is_string());
-        assert_eq!(t.warnings.len(), 3, "{:?}", t.warnings);
+        // The three ignored DNS details, and no geoip:private block rule.
+        assert_eq!(t.warnings.len(), 4, "{:?}", t.warnings);
+        assert!(t.warnings.iter().any(|w| w.contains("geoip:private")));
         assert!(t.api.is_none());
 
         let mut ib = reality_inbound();
