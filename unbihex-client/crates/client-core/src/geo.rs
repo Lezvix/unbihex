@@ -117,12 +117,28 @@ async fn download(url: &str, dest: &Path) -> Result<()> {
 
 /// Downloads both files, checks them and replaces the old ones atomically.
 pub async fn update(dir: &Path, settings: &Settings) -> Result<GeoStatus> {
-    let site_tmp = dir.join("geosite.dat.part");
-    let ip_tmp = dir.join("geoip.dat.part");
-    download(&settings.geosite_url, &site_tmp).await?;
-    download(&settings.geoip_url, &ip_tmp).await?;
+    // Own names: another download (a second process) must not write into our files.
+    let id = uuid::Uuid::new_v4().simple();
+    let site_tmp = dir.join(format!("geosite.dat.{id}.part"));
+    let ip_tmp = dir.join(format!("geoip.dat.{id}.part"));
+    let res = update_from(dir, settings, &site_tmp, &ip_tmp).await;
+    if res.is_err() {
+        let _ = tokio::fs::remove_file(&site_tmp).await;
+        let _ = tokio::fs::remove_file(&ip_tmp).await;
+    }
+    res
+}
+
+async fn update_from(
+    dir: &Path,
+    settings: &Settings,
+    site_tmp: &Path,
+    ip_tmp: &Path,
+) -> Result<GeoStatus> {
+    download(&settings.geosite_url, site_tmp).await?;
+    download(&settings.geoip_url, ip_tmp).await?;
     let (sites, ips) = {
-        let (s, i) = (site_tmp.clone(), ip_tmp.clone());
+        let (s, i) = (site_tmp.to_path_buf(), ip_tmp.to_path_buf());
         tokio::task::spawn_blocking(move || -> Result<(Vec<String>, Vec<String>)> {
             let sites = list_codes(&s).map_err(|e| ClientError::Subscription(format!("geosite.dat: {e}")))?;
             let ips = list_codes(&i).map_err(|e| ClientError::Subscription(format!("geoip.dat: {e}")))?;
@@ -134,8 +150,8 @@ pub async fn update(dir: &Path, settings: &Settings) -> Result<GeoStatus> {
     if sites.is_empty() || ips.is_empty() {
         return Err(ClientError::Subscription("базы правил пустые или повреждены".into()));
     }
-    tokio::fs::rename(&site_tmp, dir.join("geosite.dat")).await?;
-    tokio::fs::rename(&ip_tmp, dir.join("geoip.dat")).await?;
+    tokio::fs::rename(site_tmp, dir.join("geosite.dat")).await?;
+    tokio::fs::rename(ip_tmp, dir.join("geoip.dat")).await?;
     Ok(GeoStatus {
         updated_at: Some(now_secs()),
         sites,

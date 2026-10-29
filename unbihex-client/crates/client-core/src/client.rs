@@ -46,6 +46,8 @@ pub struct PingResult {
 pub struct Client {
     dir: PathBuf,
     data: parking_lot::RwLock<AppData>,
+    /// One rule-database download at a time (the background check and the UI button).
+    geo_update: tokio::sync::Mutex<()>,
     /// The engine controller.
     pub controller: Arc<Controller>,
 }
@@ -81,6 +83,7 @@ impl Client {
         let client = Client {
             controller: Arc::new(Controller::new(dir.clone())),
             data: parking_lot::RwLock::new(data),
+            geo_update: tokio::sync::Mutex::new(()),
             dir,
         };
         if fresh && let Err(e) = client.save() {
@@ -451,6 +454,11 @@ impl Client {
 
     /// Downloads the rule databases.
     pub async fn update_geodata(&self) -> Result<crate::model::GeoStatus> {
+        let _guard = self.geo_update.lock().await;
+        self.update_geodata_locked().await
+    }
+
+    async fn update_geodata_locked(&self) -> Result<crate::model::GeoStatus> {
         let settings = self.settings();
         match crate::geo::update(&self.dir, &settings).await {
             Ok(status) => {
@@ -467,12 +475,14 @@ impl Client {
 
     /// Downloads the databases when automatic updates are on and a week has passed.
     pub async fn update_geodata_if_due(&self) -> Option<Result<crate::model::GeoStatus>> {
+        // Checked under the lock: a download that just finished makes this one unneeded.
+        let _guard = self.geo_update.lock().await;
         let (auto, due) = {
             let d = self.data.read();
             (d.settings.geo_auto_update, crate::geo::is_due(&d.geo, now_secs()))
         };
         if auto && due {
-            Some(self.update_geodata().await)
+            Some(self.update_geodata_locked().await)
         } else {
             None
         }
