@@ -3,13 +3,15 @@ package com.unbihex.vpn
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import androidx.activity.result.ActivityResult
+import app.tauri.PermissionState
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
+import app.tauri.annotation.Permission
+import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -34,7 +36,9 @@ class StartArgs {
  * resolves with the TUN file descriptor once the interface is up. The Unbihex engine
  * then runs inside this app process on that descriptor.
  */
-@TauriPlugin
+@TauriPlugin(
+    permissions = [Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = "notifications")]
+)
 class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     private var pendingArgs: StartArgs? = null
 
@@ -46,7 +50,7 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
             pendingArgs = args
             startActivityForResult(invoke, permission, "onVpnPermission")
         } else {
-            launch(invoke, args)
+            askForNotifications(invoke, args)
         }
     }
 
@@ -55,14 +59,32 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         val args = pendingArgs
         pendingArgs = null
         if (result.resultCode == Activity.RESULT_OK && args != null) {
-            launch(invoke, args)
+            askForNotifications(invoke, args)
         } else {
             invoke.reject("Разрешение на VPN не выдано")
         }
     }
 
+    // A notification posted before the answer stays hidden, so the VPN waits for it.
+    private fun askForNotifications(invoke: Invoke, args: StartArgs) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            getPermissionState("notifications") != PermissionState.GRANTED
+        ) {
+            pendingArgs = args
+            requestPermissionForAlias("notifications", invoke, "onNotificationPermission")
+        } else {
+            launch(invoke, args)
+        }
+    }
+
+    @PermissionCallback
+    fun onNotificationPermission(invoke: Invoke) {
+        val args = pendingArgs
+        pendingArgs = null
+        if (args != null) launch(invoke, args) else invoke.reject("Не удалось запустить VPN")
+    }
+
     private fun launch(invoke: Invoke, args: StartArgs) {
-        askForNotifications()
         UnbihexVpnService.onEstablished = { fd, error ->
             if (fd != null) {
                 val res = JSObject()
@@ -85,14 +107,6 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             UnbihexVpnService.onEstablished = null
             invoke.reject("Не удалось запустить VPN-сервис: ${e.message}")
-        }
-    }
-
-    private fun askForNotifications() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0x5542)
         }
     }
 
