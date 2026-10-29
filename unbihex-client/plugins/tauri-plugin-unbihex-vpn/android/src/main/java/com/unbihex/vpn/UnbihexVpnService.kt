@@ -67,10 +67,21 @@ class UnbihexVpnService : VpnService() {
         // Set while the worker starts the engine for the service: a stop meanwhile stops it too.
         private var engineStarting = false
 
+        // The running instance. Main thread.
+        private var running: UnbihexVpnService? = null
+
         /** Connects to the selected server without the UI. */
         fun connect(context: Context) {
             val intent = Intent(context, UnbihexVpnService::class.java).setAction(ACTION_CONNECT)
             ContextCompat.startForegroundService(context, intent)
+        }
+
+        /**
+         * Stops the service before the app process exits: a foreground service still up
+         * at exit can leave its notification behind. Main thread.
+         */
+        fun stopBeforeExit() {
+            running?.stop(stopEngine = true)
         }
 
         /** Stops the connection, whoever started it. */
@@ -104,6 +115,7 @@ class UnbihexVpnService : VpnService() {
         super.onCreate()
         title = getString(R.string.unbihex_vpn_name)
         notification = StatusNotification(this)
+        running = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -286,6 +298,7 @@ class UnbihexVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        if (running === this) running = null
         if (state != State.DISCONNECTED) stop(stopEngine = true)
         notification.hide()
         super.onDestroy()
