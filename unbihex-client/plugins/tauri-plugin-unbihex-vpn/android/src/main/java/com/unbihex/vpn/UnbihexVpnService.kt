@@ -22,7 +22,8 @@ import java.util.concurrent.Executors
  * (to the proxy server, DNS and direct sites) out of the tunnel without protect().
  *
  * Two ways in:
- * * the app (`START`/`STOP`) starts and stops the engine itself;
+ * * the app (`START`/`STOP`) starts and stops the engine itself and reports a started
+ *   engine with `STARTED`;
  * * the tile, the notification and always-on VPN (`CONNECT`/`DISCONNECT`) leave the
  *   engine to the service, which drives it through [EngineBridge].
  *
@@ -34,6 +35,7 @@ class UnbihexVpnService : VpnService() {
     companion object {
         const val ACTION_START = "com.unbihex.vpn.START"
         const val ACTION_STOP = "com.unbihex.vpn.STOP"
+        const val ACTION_STARTED = "com.unbihex.vpn.STARTED"
         const val ACTION_CONNECT = "com.unbihex.vpn.CONNECT"
         const val ACTION_DISCONNECT = "com.unbihex.vpn.DISCONNECT"
         const val EXTRA_MTU = "mtu"
@@ -61,6 +63,9 @@ class UnbihexVpnService : VpnService() {
 
         // Bumped by every start and stop; late results of an older attempt are dropped.
         private var generation = 0
+
+        // Set while the worker starts the engine for the service: a stop meanwhile stops it too.
+        private var engineStarting = false
 
         /** Connects to the selected server without the UI. */
         fun connect(context: Context) {
@@ -92,6 +97,9 @@ class UnbihexVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private var title = ""
 
+    // The generation of the app's start; `STARTED` counts only while it is current.
+    private var appGeneration = -1
+
     override fun onCreate() {
         super.onCreate()
         title = getString(R.string.unbihex_vpn_name)
@@ -101,6 +109,7 @@ class UnbihexVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> startFromApp(intent)
+            ACTION_STARTED -> appStarted()
             ACTION_CONNECT, SERVICE_INTERFACE -> connectHere()
             ACTION_DISCONNECT -> stop(stopEngine = true)
             // STOP, or a restart after the process died (null intent): the engine is gone already.
@@ -116,7 +125,7 @@ class UnbihexVpnService : VpnService() {
             callback?.invoke(null, "VPN уже подключается")
             return
         }
-        generation++
+        val gen = ++generation
         val params = TunParams(
             mtu = intent.getIntExtra(EXTRA_MTU, 1500),
             address = intent.getStringExtra(EXTRA_ADDRESS) ?: "10.199.233.1",
@@ -127,12 +136,22 @@ class UnbihexVpnService : VpnService() {
         setState(State.CONNECTING, params.session)
         try {
             val fd = establish(params)
-            setState(State.CONNECTED, params.session)
+            appGeneration = gen
             callback?.invoke(fd, null)
         } catch (e: Exception) {
             Log.e(TAG, "establish failed", e)
             stop(stopEngine = false)
             callback?.invoke(null, e.message ?: e.toString())
+        }
+    }
+
+    private fun appStarted() {
+        if (appGeneration == generation) {
+            appGeneration = -1
+            setState(State.CONNECTED, title)
+        } else if (state == State.DISCONNECTED) {
+            // Late news of a stopped attempt; do not keep a service that was created for it.
+            stopSelf()
         }
     }
 
@@ -177,6 +196,7 @@ class UnbihexVpnService : VpnService() {
             return
         }
         setState(State.CONNECTING, params.session)
+        engineStarting = true
         worker.execute {
             val error = try {
                 EngineBridge.connect(fd)
@@ -186,11 +206,10 @@ class UnbihexVpnService : VpnService() {
                 e.message ?: e.toString()
             }
             main.post {
-                when {
-                    gen != generation -> if (error == null) worker.execute { EngineBridge.disconnect() }
-                    error != null -> fail(error)
-                    else -> setState(State.CONNECTED, params.session)
-                }
+                // A stop since then has already queued the engine stop.
+                if (gen != generation) return@post
+                engineStarting = false
+                if (error != null) fail(error) else setState(State.CONNECTED, params.session)
             }
         }
     }
@@ -230,7 +249,9 @@ class UnbihexVpnService : VpnService() {
         generation++
         closeTun()
         setState(State.DISCONNECTED, title)
-        if (stopEngine) {
+        // Queued after a start in progress, so it runs as soon as that one ends.
+        if (stopEngine || engineStarting) {
+            engineStarting = false
             worker.execute {
                 try {
                     EngineBridge.disconnect()
@@ -246,7 +267,7 @@ class UnbihexVpnService : VpnService() {
         state = next
         this.title = title
         if (next == State.DISCONNECTED) notification.hide() else notification.show(next, title)
-        UnbihexTileService.update(this)
+        UnbihexTileService.update()
     }
 
     private fun closeTun() {
@@ -260,7 +281,8 @@ class UnbihexVpnService : VpnService() {
 
     override fun onRevoke() {
         // Another VPN took over or the user switched us off in Settings.
-        stop(stopEngine = true)
+        // May come on another thread; the state lives on the main one.
+        main.post { stop(stopEngine = true) }
     }
 
     override fun onDestroy() {

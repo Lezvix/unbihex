@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.text.format.Formatter
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -37,9 +38,9 @@ internal class StatusNotification(private val service: Service) {
     private val main = Handler(Looper.getMainLooper())
     private var connected: NotificationCompat.Builder? = null
     private var since = 0L
+    private var shownTitle: String? = null
     private var shownText: String? = null
     private var poller: ScheduledExecutorService? = null
-    private var last: LongArray? = null
 
     // Screen on/off reach only receivers registered at run time.
     private var screenWatch: BroadcastReceiver? = null
@@ -73,6 +74,7 @@ internal class StatusNotification(private val service: Service) {
                 .setUsesChronometer(true)
                 .addAction(0, service.getString(R.string.unbihex_vpn_disconnect), disconnectIntent())
             connected = builder
+            shownTitle = title
             shownText = null
             watchSpeed()
         } else {
@@ -118,13 +120,15 @@ internal class StatusNotification(private val service: Service) {
         connected = null
     }
 
+    private class Sample(val at: Long, val up: Long, val down: Long)
+
     private fun startPolling() {
         if (poller != null) return
-        // Counting starts anew: a gap would show as one huge burst.
-        last = null
-        poller = Executors.newSingleThreadScheduledExecutor().also {
-            it.scheduleWithFixedDelay(::tick, 1, 1, TimeUnit.SECONDS)
-        }
+        val executor = Executors.newSingleThreadScheduledExecutor()
+        // Each poll counts anew: a gap would show as one huge burst.
+        var last: Sample? = null
+        executor.scheduleWithFixedDelay({ last = tick(executor, last) }, 1, 1, TimeUnit.SECONDS)
+        poller = executor
     }
 
     private fun stopPolling() {
@@ -132,25 +136,30 @@ internal class StatusNotification(private val service: Service) {
         poller = null
     }
 
-    private fun tick() {
-        val now = try {
-            EngineBridge.stats()
+    /** Shows the speed since [prev] and returns the new sample. Runs on [executor]. */
+    private fun tick(executor: ScheduledExecutorService, prev: Sample?): Sample? {
+        val (stats, title) = try {
+            (EngineBridge.stats() ?: return null) to (EngineBridge.session() ?: return null)
         } catch (e: Throwable) {
             Log.w(TAG, "stats: ${e.message}")
-            null
-        } ?: return
-        val prev = last
-        last = now
-        if (prev == null) return
-        val up = Formatter.formatShortFileSize(service, maxOf(0, now[0] - prev[0]))
-        val down = Formatter.formatShortFileSize(service, maxOf(0, now[1] - prev[1]))
+            return null
+        }
+        val now = Sample(SystemClock.elapsedRealtime(), stats[0], stats[1])
+        val ms = now.at - (prev ?: return now).at
+        if (ms <= 0) return now
+        val up = Formatter.formatShortFileSize(service, maxOf(0, now.up - prev.up) * 1000 / ms)
+        val down = Formatter.formatShortFileSize(service, maxOf(0, now.down - prev.down) * 1000 / ms)
         val text = service.getString(R.string.unbihex_vpn_speed, down, up)
         main.post {
+            // A stopped poll may still finish its call.
+            if (poller !== executor) return@post
             val builder = connected ?: return@post
-            if (text == shownText) return@post
+            if (title == shownTitle && text == shownText) return@post
+            shownTitle = title
             shownText = text
-            manager.notify(ID, builder.setContentText(text).build())
+            manager.notify(ID, builder.setContentTitle(title).setContentText(text).build())
         }
+        return now
     }
 
     private fun openAppIntent(): PendingIntent? {

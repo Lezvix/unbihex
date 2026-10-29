@@ -23,6 +23,11 @@ impl<R: Runtime> UnbihexVpn<R> {
     }
 
     /// Not available on desktop.
+    pub fn started(&self) -> crate::Result<()> {
+        Err(crate::Error::Unsupported(ONLY_MOBILE))
+    }
+
+    /// Not available on desktop.
     pub fn stop(&self) -> crate::Result<()> {
         Err(crate::Error::Unsupported(ONLY_MOBILE))
     }

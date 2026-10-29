@@ -97,6 +97,22 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /** The engine runs on the descriptor from `start`: the service may show the connection. */
+    @Command
+    fun started(invoke: Invoke) {
+        if (UnbihexVpnService.state != UnbihexVpnService.State.DISCONNECTED) {
+            val intent = Intent(activity, UnbihexVpnService::class.java).apply {
+                action = UnbihexVpnService.ACTION_STARTED
+            }
+            try {
+                activity.startService(intent)
+            } catch (_: Exception) {
+                // The service is gone: nothing to show.
+            }
+        }
+        invoke.resolve()
+    }
+
     @Command
     fun stop(invoke: Invoke) {
         val intent = Intent(activity, UnbihexVpnService::class.java).apply {

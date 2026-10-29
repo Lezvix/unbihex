@@ -1,8 +1,6 @@
 package com.unbihex.vpn
 
 import android.app.PendingIntent
-import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
@@ -19,18 +17,9 @@ class UnbihexTileService : TileService() {
         @Volatile
         private var listening: UnbihexTileService? = null
 
-        /** Redraws the tile after a state change. Main thread. */
-        fun update(context: Context) {
-            val tile = listening
-            if (tile != null) {
-                tile.render()
-                return
-            }
-            try {
-                requestListeningState(context, ComponentName(context, UnbihexTileService::class.java))
-            } catch (e: Exception) {
-                Log.w(TAG, "tile update: ${e.message}")
-            }
+        /** Redraws a visible tile after a state change; a hidden one is drawn when the shade opens. Main thread. */
+        fun update() {
+            listening?.render()
         }
     }
 

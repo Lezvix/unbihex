@@ -29,6 +29,15 @@ impl<R: Runtime> UnbihexVpn<R> {
         self.0.run_mobile_plugin("start", args).map_err(Into::into)
     }
 
+    /// Android: the engine runs on the descriptor from `start`, so the service may
+    /// report the connection.
+    pub fn started(&self) -> crate::Result<()> {
+        self.0
+            .run_mobile_plugin::<serde_json::Value>("started", ())
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     /// Brings the tunnel down.
     pub fn stop(&self) -> crate::Result<()> {
         self.0

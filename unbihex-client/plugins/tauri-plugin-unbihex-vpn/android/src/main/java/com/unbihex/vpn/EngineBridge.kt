@@ -16,7 +16,7 @@ internal object EngineBridge {
     @JvmStatic
     external fun tunArgs(dataDir: String): String
 
-    /** Starts the engine on the TUN descriptor; throws on failure. */
+    /** Starts the engine on the TUN descriptor, with the plan of the last [tunArgs]; throws on failure. */
     @JvmStatic
     external fun connect(fd: Int)
 
@@ -27,4 +27,8 @@ internal object EngineBridge {
     /** Bytes `[up, down]` of the running engine, null when nothing runs. */
     @JvmStatic
     external fun stats(): LongArray?
+
+    /** Session name of the running connection, null when nothing runs. */
+    @JvmStatic
+    external fun session(): String?
 }

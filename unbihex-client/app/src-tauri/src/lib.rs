@@ -93,36 +93,54 @@ async fn do_connect(_app: &AppHandle, client: &Client) -> Result<ConnectionInfo,
     client.connect().await
 }
 
-/// Interface parameters for the selected server; building them validates its config,
+/// One connection attempt: the TUN interface and the engine are built from the same data.
+#[cfg(mobile)]
+struct VpnPlan {
+    server: unbihex_client_core::Server,
+    settings: Settings,
+    geo: unbihex_client_core::geo::Geo,
+    args: tauri_plugin_unbihex_vpn::StartArgs,
+}
+
+/// Name of the VPN session and of the status notification.
+#[cfg(mobile)]
+fn session_name(server: &str) -> String {
+    format!("Unbihex · {server}")
+}
+
+/// Plans a connection to the selected server; building the config validates it,
 /// so nothing is asked of the OS for a server that cannot work.
 #[cfg(mobile)]
-fn vpn_start_args(
-    client: &Client,
-) -> Result<(unbihex_client_core::Server, tauri_plugin_unbihex_vpn::StartArgs), ClientError> {
+fn vpn_plan(client: &Client) -> Result<VpnPlan, ClientError> {
     use unbihex_client_core::plan::{TUN_ADDRESS, TUN_DNS, TUN_PREFIX, Target, build_config_json};
 
     let server = client.selected_server()?;
     let settings = client.settings();
-    let config_json = build_config_json(&server, &settings, &client.geo(), Target::Mobile)?;
+    let geo = client.geo();
+    let config_json = build_config_json(&server, &settings, &geo, Target::Mobile)?;
     let args = tauri_plugin_unbihex_vpn::StartArgs {
         mtu: settings.mtu,
         address: TUN_ADDRESS.into(),
         prefix: TUN_PREFIX,
         dns: TUN_DNS.into(),
-        session: format!("Unbihex · {}", server.name),
+        session: session_name(&server.name),
         config_json: if cfg!(target_os = "ios") { config_json } else { String::new() },
         server_address: server.host.clone(),
     };
-    Ok((server, args))
+    Ok(VpnPlan {
+        server,
+        settings,
+        geo,
+        args,
+    })
 }
 
 /// Android: runs the engine on the TUN the VPN service has just set up.
 #[cfg(mobile)]
-async fn start_engine(client: &Client, fd: i32) -> Result<ConnectionInfo, ClientError> {
-    let server = client.selected_server()?;
+async fn start_engine(client: &Client, plan: &VpnPlan, fd: i32) -> Result<ConnectionInfo, ClientError> {
     client
         .controller
-        .connect_tun_fd(&server, &client.settings(), &client.geo(), fd, None)
+        .connect_tun_fd(&plan.server, &plan.settings, &plan.geo, fd, None)
         .await
 }
 
@@ -133,21 +151,26 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
     if client.controller.is_connected().await {
         return Err(ClientError::State("уже подключено".into()));
     }
-    let (server, args) = vpn_start_args(client)?;
+    let plan = vpn_plan(client)?;
     let handle = app.clone();
+    let args = plan.args.clone();
     let resp = tauri::async_runtime::spawn_blocking(move || handle.unbihex_vpn().start(args))
         .await
         .map_err(|e| ClientError::State(e.to_string()))?
         .map_err(|e| ClientError::State(e.to_string()))?;
 
     if cfg!(target_os = "ios") {
-        return Ok(client.controller.mark_external(&server).await);
+        return Ok(client.controller.mark_external(&plan.server).await);
     }
     let fd = resp
         .fd
         .ok_or_else(|| ClientError::State("VPN-сервис не вернул дескриптор TUN".into()))?;
-    match start_engine(client, fd).await {
-        Ok(info) => Ok(info),
+    match start_engine(client, &plan, fd).await {
+        Ok(info) => {
+            let handle = app.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || handle.unbihex_vpn().started()).await;
+            Ok(info)
+        }
         Err(e) => {
             stop_vpn_service(app).await;
             Err(e)
