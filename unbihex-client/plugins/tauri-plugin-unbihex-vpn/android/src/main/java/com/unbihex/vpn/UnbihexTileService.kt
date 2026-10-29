@@ -13,11 +13,10 @@ class UnbihexTileService : TileService() {
     companion object {
         private const val TAG = "UnbihexVpn"
 
-        // Set while the shade shows the tile.
+        // Set while the shade shows the tile; a hidden one is drawn when the shade opens.
         @Volatile
         private var listening: UnbihexTileService? = null
 
-        /** Redraws a visible tile after a state change; a hidden one is drawn when the shade opens. Main thread. */
         fun update() {
             listening?.render()
         }

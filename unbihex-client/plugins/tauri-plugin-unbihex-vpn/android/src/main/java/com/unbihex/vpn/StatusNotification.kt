@@ -21,11 +21,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
-/**
- * The foreground notification of [UnbihexVpnService]: state, time connected, speed
- * and a "Disconnect" button. Speed is polled only while the screen is on, and the
- * notification is redrawn only when its text changes.
- */
+/** Foreground notification of [UnbihexVpnService]. Speed is polled only while the screen is on. */
 internal class StatusNotification(private val service: Service) {
     companion object {
         private const val ID = 0x55_42
@@ -45,7 +41,7 @@ internal class StatusNotification(private val service: Service) {
     // Screen on/off reach only receivers registered at run time.
     private var screenWatch: BroadcastReceiver? = null
 
-    fun show(state: UnbihexVpnService.State, title: String) {
+    init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             manager.createNotificationChannel(
                 NotificationChannel(
@@ -55,6 +51,9 @@ internal class StatusNotification(private val service: Service) {
                 )
             )
         }
+    }
+
+    fun show(state: UnbihexVpnService.State, title: String) {
         val builder = NotificationCompat.Builder(service, CHANNEL)
             .setSmallIcon(R.drawable.ic_unbihex_vpn)
             .setContentTitle(title)
@@ -136,17 +135,20 @@ internal class StatusNotification(private val service: Service) {
         poller = null
     }
 
-    /** Shows the speed since [prev] and returns the new sample. Runs on [executor]. */
     private fun tick(executor: ScheduledExecutorService, prev: Sample?): Sample? {
-        val (stats, title) = try {
-            (EngineBridge.stats() ?: return null) to (EngineBridge.session() ?: return null)
+        val stats: LongArray?
+        val title: String?
+        try {
+            stats = EngineBridge.stats()
+            title = EngineBridge.session()
         } catch (e: Throwable) {
             Log.w(TAG, "stats: ${e.message}")
             return null
         }
+        if (stats == null || title == null) return null
         val now = Sample(SystemClock.elapsedRealtime(), stats[0], stats[1])
-        val ms = now.at - (prev ?: return now).at
-        if (ms <= 0) return now
+        if (prev == null || now.at <= prev.at) return now
+        val ms = now.at - prev.at
         val up = Formatter.formatShortFileSize(service, maxOf(0, now.up - prev.up) * 1000 / ms)
         val down = Formatter.formatShortFileSize(service, maxOf(0, now.down - prev.down) * 1000 / ms)
         val text = service.getString(R.string.unbihex_vpn_speed, down, up)

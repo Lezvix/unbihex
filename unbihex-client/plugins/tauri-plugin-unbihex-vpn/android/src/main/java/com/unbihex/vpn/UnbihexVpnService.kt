@@ -14,20 +14,16 @@ import org.json.JSONObject
 import java.util.concurrent.Executors
 
 /**
- * Owns the TUN interface and the status notification. The descriptor stays open here;
- * the engine works on a dup() of it, so closing this one (stop or revoke) plus stopping
- * the engine tears the interface down.
+ * Owns the TUN interface. The descriptor stays open here; the engine works on a
+ * dup() of it, so closing this one (stop or revoke) plus stopping the engine tears
+ * the interface down.
  *
  * The app's own package is excluded from the VPN, which keeps the engine's sockets
  * (to the proxy server, DNS and direct sites) out of the tunnel without protect().
  *
- * Two ways in:
- * * the app (`START`/`STOP`) starts and stops the engine itself and reports a started
- *   engine with `STARTED`;
- * * the tile, the notification and always-on VPN (`CONNECT`/`DISCONNECT`) leave the
- *   engine to the service, which drives it through [EngineBridge].
- *
- * State lives on the main thread; engine calls run on [worker].
+ * The app (`START`/`STARTED`/`STOP`) drives the engine itself; the tile, the notification
+ * and always-on VPN (`CONNECT`/`DISCONNECT`) leave it to the service. State lives on the
+ * main thread; engine calls run on [worker].
  */
 class UnbihexVpnService : VpnService() {
     enum class State { DISCONNECTED, CONNECTING, CONNECTED }
@@ -45,7 +41,6 @@ class UnbihexVpnService : VpnService() {
         const val EXTRA_SESSION = "session"
         private const val TAG = "UnbihexVpn"
 
-        /** Shown by the tile and the notification. */
         @Volatile
         var state: State = State.DISCONNECTED
             private set
@@ -67,24 +62,13 @@ class UnbihexVpnService : VpnService() {
         // Set while the worker starts the engine for the service: a stop meanwhile stops it too.
         private var engineStarting = false
 
-        // The running instance. Main thread.
         private var running: UnbihexVpnService? = null
 
-        /** Connects to the selected server without the UI. */
         fun connect(context: Context) {
             val intent = Intent(context, UnbihexVpnService::class.java).setAction(ACTION_CONNECT)
             ContextCompat.startForegroundService(context, intent)
         }
 
-        /**
-         * Stops the service before the app process exits: a foreground service still up
-         * at exit can leave its notification behind. Main thread.
-         */
-        fun stopBeforeExit() {
-            running?.stop(stopEngine = true)
-        }
-
-        /** Stops the connection, whoever started it. */
         fun disconnect(context: Context) {
             val intent = Intent(context, UnbihexVpnService::class.java).setAction(ACTION_DISCONNECT)
             try {
@@ -92,6 +76,11 @@ class UnbihexVpnService : VpnService() {
             } catch (_: Exception) {
                 // The service is not running: nothing to stop.
             }
+        }
+
+        // A foreground service still up when the process exits can leave its notification behind.
+        fun stopBeforeExit() {
+            running?.stop(stopEngine = true)
         }
     }
 
@@ -124,7 +113,7 @@ class UnbihexVpnService : VpnService() {
             ACTION_STARTED -> appStarted()
             ACTION_CONNECT, SERVICE_INTERFACE -> connectHere()
             ACTION_DISCONNECT -> stop(stopEngine = true)
-            // STOP, or a restart after the process died (null intent): the engine is gone already.
+            // A null intent is a restart after the process died: the engine is gone too.
             else -> stop(stopEngine = false)
         }
         return START_NOT_STICKY
@@ -176,7 +165,6 @@ class UnbihexVpnService : VpnService() {
         val gen = ++generation
         setState(State.CONNECTING, getString(R.string.unbihex_vpn_name))
         if (prepare(this) != null) {
-            // The permission dialog needs an activity.
             fail(getString(R.string.unbihex_vpn_need_app))
             return
         }
@@ -194,11 +182,11 @@ class UnbihexVpnService : VpnService() {
 
     private fun establishHere(gen: Int, args: JSONObject) {
         val params = TunParams(
-            mtu = args.optInt("mtu", 1500),
-            address = args.optString("address", "10.199.233.1"),
-            prefix = args.optInt("prefix", 30),
-            dns = args.optString("dns", "10.199.233.2"),
-            session = args.optString("session", title),
+            mtu = args.getInt("mtu"),
+            address = args.getString("address"),
+            prefix = args.getInt("prefix"),
+            dns = args.getString("dns"),
+            session = args.getString("session"),
         )
         val fd = try {
             establish(params)
@@ -300,7 +288,6 @@ class UnbihexVpnService : VpnService() {
     override fun onDestroy() {
         if (running === this) running = null
         if (state != State.DISCONNECTED) stop(stopEngine = true)
-        notification.hide()
         super.onDestroy()
     }
 }

@@ -88,7 +88,6 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /** The status notification stays hidden without this permission; the VPN works either way. */
     private fun askForNotifications() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -97,7 +96,6 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    /** The engine runs on the descriptor from `start`: the service may show the connection. */
     @Command
     fun started(invoke: Invoke) {
         if (UnbihexVpnService.state != UnbihexVpnService.State.DISCONNECTED) {

@@ -1,8 +1,4 @@
-//! JNI for `com.unbihex.vpn.EngineBridge`: the VPN service connects without the UI
-//! (quick settings tile, notification, always-on VPN) and drives the engine through
-//! the same client the UI uses.
-//!
-//! Kotlin calls these from a worker thread; they block until the work is done.
+//! JNI for `com.unbihex.vpn.EngineBridge`: the VPN service drives the engine without the UI.
 
 use std::path::PathBuf;
 use std::ptr;
@@ -21,11 +17,7 @@ fn throw(env: &mut JNIEnv, msg: impl std::fmt::Display) {
     let _ = env.throw_new("java/lang/IllegalStateException", msg.to_string());
 }
 
-fn not_open(env: &mut JNIEnv) {
-    throw(env, "клиент не открыт");
-}
-
-/// `StartArgs` JSON for the selected server. Opens the client on first use.
+/// Opens the client on first use.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_tunArgs<'l>(
     mut env: JNIEnv<'l>,
@@ -60,7 +52,6 @@ pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_tunArgs<'l>(
     }
 }
 
-/// Starts the engine on the service's TUN descriptor, as the last `tunArgs` planned.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_connect<'l>(
     mut env: JNIEnv<'l>,
@@ -68,13 +59,13 @@ pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_connect<'l>(
     fd: jint,
 ) {
     let Some(state) = SHARED.get() else {
-        return not_open(&mut env);
+        return throw(&mut env, "клиент не открыт");
     };
     let Some(plan) = PLAN.lock().unwrap_or_else(PoisonError::into_inner).take() else {
         return throw(&mut env, "подключение не подготовлено");
     };
     let r = tauri::async_runtime::block_on(async {
-        // Waiting for the lock could deadlock: the UI may hold it while it waits for the service.
+        // The UI is in the middle of its own connect or disconnect: it wins.
         let Ok(_op) = state.op.try_lock() else {
             return Err("приложение уже подключается".to_string());
         };
@@ -85,16 +76,14 @@ pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_connect<'l>(
     }
 }
 
-/// Stops the engine; the service closes the TUN itself.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_disconnect<'l>(_env: JNIEnv<'l>, _class: JClass<'l>) {
     if let Some(state) = SHARED.get() {
-        // No `op` lock (see `connect`); disconnecting is idempotent anyway.
+        // Not under `op`: the user's stop must not wait for the UI.
         tauri::async_runtime::block_on(state.client.disconnect());
     }
 }
 
-/// `[up, down]` bytes through the engine, or null when it is not running.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_stats<'l>(
     mut env: JNIEnv<'l>,
@@ -123,7 +112,6 @@ pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_stats<'l>(
     }
 }
 
-/// Session name of the running connection, or null. Follows hot server changes.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_unbihex_vpn_EngineBridge_session<'l>(
     mut env: JNIEnv<'l>,

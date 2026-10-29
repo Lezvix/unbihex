@@ -29,8 +29,7 @@ struct AppState {
 
 static SHARED: OnceLock<AppState> = OnceLock::new();
 
-/// The one client of this process. On Android the VPN service (quick settings tile)
-/// may get here before the UI does, so whoever comes first opens it.
+/// One client per process: on Android the VPN service may open it before the UI does.
 fn shared_state(dir: impl FnOnce() -> PathBuf) -> &'static AppState {
     SHARED.get_or_init(|| {
         let (logs, level) = logs::init("info");
@@ -93,7 +92,7 @@ async fn do_connect(_app: &AppHandle, client: &Client) -> Result<ConnectionInfo,
     client.connect().await
 }
 
-/// One connection attempt: the TUN interface and the engine are built from the same data.
+/// One connection attempt: the TUN and the engine are built from the same data.
 #[cfg(mobile)]
 struct VpnPlan {
     server: unbihex_client_core::Server,
@@ -102,20 +101,18 @@ struct VpnPlan {
     args: tauri_plugin_unbihex_vpn::StartArgs,
 }
 
-/// Name of the VPN session and of the status notification.
 #[cfg(mobile)]
 fn session_name(server: &str) -> String {
     format!("Unbihex · {server}")
 }
 
-/// Plans a connection to the selected server; building the config validates it,
-/// so nothing is asked of the OS for a server that cannot work.
 #[cfg(mobile)]
 fn vpn_plan(client: &Client) -> Result<VpnPlan, ClientError> {
     use unbihex_client_core::plan::{TUN_ADDRESS, TUN_DNS, TUN_PREFIX, Target, build_config_json};
 
     let server = client.selected_server()?;
     let settings = client.settings();
+    // Validate before asking the OS for anything.
     let geo = client.geo();
     let config_json = build_config_json(&server, &settings, &geo, Target::Mobile)?;
     let args = tauri_plugin_unbihex_vpn::StartArgs {
@@ -135,7 +132,6 @@ fn vpn_plan(client: &Client) -> Result<VpnPlan, ClientError> {
     })
 }
 
-/// Android: runs the engine on the TUN the VPN service has just set up.
 #[cfg(mobile)]
 async fn start_engine(client: &Client, plan: &VpnPlan, fd: i32) -> Result<ConnectionInfo, ClientError> {
     client
