@@ -4,7 +4,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
@@ -19,7 +22,8 @@ import java.util.concurrent.TimeUnit
 
 /**
  * The foreground notification of [UnbihexVpnService]: state, time connected, speed
- * and a "Disconnect" button. Speed is polled only while the screen is on.
+ * and a "Disconnect" button. Speed is polled only while the screen is on, and the
+ * notification is redrawn only when its text changes.
  */
 internal class StatusNotification(private val service: Service) {
     companion object {
@@ -33,8 +37,12 @@ internal class StatusNotification(private val service: Service) {
     private val main = Handler(Looper.getMainLooper())
     private var connected: NotificationCompat.Builder? = null
     private var since = 0L
-    private var ticker: ScheduledExecutorService? = null
+    private var shownText: String? = null
+    private var poller: ScheduledExecutorService? = null
     private var last: LongArray? = null
+
+    // Screen on/off reach only receivers registered at run time.
+    private var screenWatch: BroadcastReceiver? = null
 
     fun show(state: UnbihexVpnService.State, title: String) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -65,10 +73,11 @@ internal class StatusNotification(private val service: Service) {
                 .setUsesChronometer(true)
                 .addAction(0, service.getString(R.string.unbihex_vpn_disconnect), disconnectIntent())
             connected = builder
-            startTicker()
+            shownText = null
+            watchSpeed()
         } else {
             builder.setContentText(service.getString(R.string.unbihex_vpn_connecting))
-            stopTicker()
+            unwatchSpeed()
             since = 0L
         }
         val n = builder.build()
@@ -80,31 +89,50 @@ internal class StatusNotification(private val service: Service) {
     }
 
     fun hide() {
-        stopTicker()
+        unwatchSpeed()
         since = 0L
         service.stopForeground(Service.STOP_FOREGROUND_REMOVE)
     }
 
-    private fun startTicker() {
-        if (ticker != null) return
+    private fun watchSpeed() {
+        if (screenWatch == null) {
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (intent.action == Intent.ACTION_SCREEN_ON) startPolling() else stopPolling()
+                }
+            }
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }
+            service.registerReceiver(receiver, filter)
+            screenWatch = receiver
+        }
+        if (power.isInteractive) startPolling()
+    }
+
+    private fun unwatchSpeed() {
+        screenWatch?.let { service.unregisterReceiver(it) }
+        screenWatch = null
+        stopPolling()
+        connected = null
+    }
+
+    private fun startPolling() {
+        if (poller != null) return
+        // Counting starts anew: a gap would show as one huge burst.
         last = null
-        ticker = Executors.newSingleThreadScheduledExecutor().also {
+        poller = Executors.newSingleThreadScheduledExecutor().also {
             it.scheduleWithFixedDelay(::tick, 1, 1, TimeUnit.SECONDS)
         }
     }
 
-    private fun stopTicker() {
-        ticker?.shutdownNow()
-        ticker = null
-        connected = null
+    private fun stopPolling() {
+        poller?.shutdownNow()
+        poller = null
     }
 
     private fun tick() {
-        if (!power.isInteractive) {
-            // A gap would show as one huge burst; start counting anew when the screen is back.
-            last = null
-            return
-        }
         val now = try {
             EngineBridge.stats()
         } catch (e: Throwable) {
@@ -119,6 +147,8 @@ internal class StatusNotification(private val service: Service) {
         val text = service.getString(R.string.unbihex_vpn_speed, down, up)
         main.post {
             val builder = connected ?: return@post
+            if (text == shownText) return@post
+            shownText = text
             manager.notify(ID, builder.setContentText(text).build())
         }
     }
