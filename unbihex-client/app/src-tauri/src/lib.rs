@@ -1,8 +1,11 @@
 //! Unbihex client app: Tauri commands over `unbihex-client-core`.
 
+#[cfg(target_os = "android")]
+mod android;
 mod logs;
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -15,12 +18,37 @@ use uuid::Uuid;
 /// How often subscriptions are checked for an update.
 const UPDATE_CHECK: Duration = Duration::from_secs(30 * 60);
 
+#[derive(Clone)]
 struct AppState {
     client: Arc<Client>,
     logs: logs::LogBuffer,
     level: Option<logs::LevelHandle>,
     /// Serializes connect/disconnect so double clicks cannot race.
-    op: tokio::sync::Mutex<()>,
+    op: Arc<tokio::sync::Mutex<()>>,
+}
+
+static SHARED: OnceLock<AppState> = OnceLock::new();
+
+/// The one client of this process. On Android the VPN service (quick settings tile)
+/// may get here before the UI does, so whoever comes first opens it.
+fn shared_state(dir: impl FnOnce() -> PathBuf) -> &'static AppState {
+    SHARED.get_or_init(|| {
+        let (logs, level) = logs::init("info");
+        let client = Arc::new(Client::open(dir()));
+        logs::set_level(&level, &client.settings().log_level);
+        tracing::info!(
+            "Unbihex {} (engine {}) on {}",
+            env!("CARGO_PKG_VERSION"),
+            unbihex_client_core::ENGINE_VERSION,
+            platform_name()
+        );
+        AppState {
+            client,
+            logs,
+            level,
+            op: Arc::default(),
+        }
+    })
 }
 
 /// Everything the UI needs in one call.
@@ -65,20 +93,18 @@ async fn do_connect(_app: &AppHandle, client: &Client) -> Result<ConnectionInfo,
     client.connect().await
 }
 
+/// Interface parameters for the selected server; building them validates its config,
+/// so nothing is asked of the OS for a server that cannot work.
 #[cfg(mobile)]
-async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, ClientError> {
-    use tauri_plugin_unbihex_vpn::{StartArgs, UnbihexVpnExt};
+fn vpn_start_args(
+    client: &Client,
+) -> Result<(unbihex_client_core::Server, tauri_plugin_unbihex_vpn::StartArgs), ClientError> {
     use unbihex_client_core::plan::{TUN_ADDRESS, TUN_DNS, TUN_PREFIX, Target, build_config_json};
 
-    if client.controller.is_connected().await {
-        return Err(ClientError::State("уже подключено".into()));
-    }
     let server = client.selected_server()?;
     let settings = client.settings();
-    // Validate before asking the OS for anything.
-    let geo = client.geo();
-    let config_json = build_config_json(&server, &settings, &geo, Target::Mobile)?;
-    let args = StartArgs {
+    let config_json = build_config_json(&server, &settings, &client.geo(), Target::Mobile)?;
+    let args = tauri_plugin_unbihex_vpn::StartArgs {
         mtu: settings.mtu,
         address: TUN_ADDRESS.into(),
         prefix: TUN_PREFIX,
@@ -87,6 +113,27 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
         config_json: if cfg!(target_os = "ios") { config_json } else { String::new() },
         server_address: server.host.clone(),
     };
+    Ok((server, args))
+}
+
+/// Android: runs the engine on the TUN the VPN service has just set up.
+#[cfg(mobile)]
+async fn start_engine(client: &Client, fd: i32) -> Result<ConnectionInfo, ClientError> {
+    let server = client.selected_server()?;
+    client
+        .controller
+        .connect_tun_fd(&server, &client.settings(), &client.geo(), fd, None)
+        .await
+}
+
+#[cfg(mobile)]
+async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, ClientError> {
+    use tauri_plugin_unbihex_vpn::UnbihexVpnExt;
+
+    if client.controller.is_connected().await {
+        return Err(ClientError::State("уже подключено".into()));
+    }
+    let (server, args) = vpn_start_args(client)?;
     let handle = app.clone();
     let resp = tauri::async_runtime::spawn_blocking(move || handle.unbihex_vpn().start(args))
         .await
@@ -99,11 +146,7 @@ async fn do_connect(app: &AppHandle, client: &Client) -> Result<ConnectionInfo, 
     let fd = resp
         .fd
         .ok_or_else(|| ClientError::State("VPN-сервис не вернул дескриптор TUN".into()))?;
-    match client
-        .controller
-        .connect_tun_fd(&server, &settings, &geo, fd, None)
-        .await
-    {
+    match start_engine(client, fd).await {
         Ok(info) => Ok(info),
         Err(e) => {
             stop_vpn_service(app).await;
@@ -447,7 +490,10 @@ fn start_background(app: AppHandle) {
         let auto = state.client.settings().auto_connect;
         if auto && state.client.selected_server().is_ok() {
             let _op = state.op.lock().await;
-            if let Err(e) = do_connect(&app, &state.client).await {
+            // The tile may have connected before the UI started.
+            if !state.client.controller.is_connected().await
+                && let Err(e) = do_connect(&app, &state.client).await
+            {
                 tracing::warn!("auto-connect: {e}");
             }
             notify(&app);
@@ -475,30 +521,16 @@ fn start_background(app: AppHandle) {
 /// App entry point (desktop `main` and the mobile entry).
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let (log_buffer, level) = logs::init("info");
-
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_unbihex_vpn::init())
-        .setup(move |app| {
-            let dir = app
-                .path()
-                .app_data_dir()
-                .unwrap_or_else(|_| std::env::temp_dir().join("unbihex"));
-            let client = Arc::new(Client::open(dir));
-            logs::set_level(&level, &client.settings().log_level);
-            tracing::info!(
-                "Unbihex {} (engine {}) on {}",
-                env!("CARGO_PKG_VERSION"),
-                unbihex_client_core::ENGINE_VERSION,
-                platform_name()
-            );
-            app.manage(AppState {
-                client,
-                logs: log_buffer.clone(),
-                level: level.clone(),
-                op: tokio::sync::Mutex::new(()),
+        .setup(|app| {
+            let state = shared_state(|| {
+                app.path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::env::temp_dir().join("unbihex"))
             });
+            app.manage(state.clone());
             #[cfg(desktop)]
             if let Err(e) = setup_tray(app) {
                 tracing::warn!("tray: {e}");

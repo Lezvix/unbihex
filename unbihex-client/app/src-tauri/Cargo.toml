@@ -36,5 +36,9 @@ uuid.workspace = true
 parking_lot = "0.12"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "registry", "std"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+# Same version as Tauri's: the VPN service calls into the app without the UI.
+jni = "0.21"
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
