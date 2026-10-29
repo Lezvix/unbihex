@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="unbihex_vpn_name">Unbihex</string>
+    <string name="unbihex_vpn_channel">Состояние VPN</string>
+    <string name="unbihex_vpn_connecting">Подключение…</string>
+    <string name="unbihex_vpn_connected">Подключено</string>
+    <string name="unbihex_vpn_disconnected">Отключено</string>
+    <string name="unbihex_vpn_disconnect">Отключить</string>
+    <string name="unbihex_vpn_speed">↓ %1$s/с · ↑ %2$s/с</string>
+    <string name="unbihex_vpn_failed">Unbihex: %1$s</string>
+    <string name="unbihex_vpn_need_app">разрешите VPN в приложении</string>
+</resources>

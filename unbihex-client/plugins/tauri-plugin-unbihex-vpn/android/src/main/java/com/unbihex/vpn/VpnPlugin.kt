@@ -1,8 +1,11 @@
 package com.unbihex.vpn
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import androidx.activity.result.ActivityResult
 import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
@@ -59,6 +62,7 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun launch(invoke: Invoke, args: StartArgs) {
+        askForNotifications()
         UnbihexVpnService.onEstablished = { fd, error ->
             if (fd != null) {
                 val res = JSObject()
@@ -81,6 +85,15 @@ class VpnPlugin(private val activity: Activity) : Plugin(activity) {
         } catch (e: Exception) {
             UnbihexVpnService.onEstablished = null
             invoke.reject("Не удалось запустить VPN-сервис: ${e.message}")
+        }
+    }
+
+    /** The status notification stays hidden without this permission; the VPN works either way. */
+    private fun askForNotifications() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            activity.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            activity.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0x5542)
         }
     }
 

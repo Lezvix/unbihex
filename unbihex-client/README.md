@@ -36,6 +36,8 @@ VPN-клиент для подписок на собственном ядре **
   логин и пароль из настроек (пароль случайный, кнопка «Новый пароль» его меняет).
   Программы на этом компьютере и системный прокси подключаются без пароля.
 - Android и iOS: системный VPN (TUN).
+  На Android — плитка «Unbihex» в быстрых настройках (подключает выбранный сервер, не открывая приложение)
+  и уведомление с состоянием, временем подключения, скоростью и кнопкой «Отключить».
 - Маршрутизация: «Всё через VPN», «Россия напрямую» (.ru/.su/.рф и крупные российские сервисы),
   «Только выбранные сайты», «Только заблокированные» (по базам geosite/geoip),
   плюс свои списки «через VPN / напрямую / блокировать». Базы правил — geosite.dat / geoip.dat (v2fly) и `.srs` (sing-box),
@@ -76,7 +78,8 @@ unbihex-client/
 │   └─ src/platform/          windows.rs (netsh, route, реестр), linux.rs, macos.rs
 ├─ crates/unbihex-ffi/        C ABI ядра (SPEC §14.1) для iOS-расширения: libunbihex.a + include/unbihex.h
 ├─ plugins/tauri-plugin-unbihex-vpn/
-│   ├─ android/               VpnService (Kotlin): поднимает TUN и отдаёт fd ядру
+│   ├─ android/               VpnService (Kotlin): поднимает TUN и отдаёт fd ядру;
+│   │                         плитка быстрых настроек и уведомление о состоянии
 │   └─ ios/                   NETunnelProviderManager (Swift): запускает Packet Tunnel
 ├─ app/
 │   ├─ ui/                    интерфейс (index.html, styles.css, app.js)

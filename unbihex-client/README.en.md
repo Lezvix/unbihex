@@ -37,6 +37,8 @@ background colour in `icons/android/values/ic_launcher_background.xml` with `#0B
   login and password from the settings (the password is random; the "New password" button changes it).
   Programs on this computer and the system proxy connect without a password.
 - Android and iOS: the system VPN (TUN).
+  On Android: an "Unbihex" quick settings tile (connects the selected server without opening the app)
+  and a notification with the state, time connected, speed and a "Disconnect" button.
 - Routing: "Everything through VPN", "Russia direct" (.ru/.su/.рф and major Russian services),
   "Only selected sites", "Only blocked sites" (by the geosite/geoip databases),
   plus your own "through VPN / direct / block" lists. Rule databases: geosite.dat / geoip.dat (v2fly) and `.srs`
@@ -77,7 +79,8 @@ unbihex-client/
 │   └─ src/platform/          windows.rs (netsh, route, registry), linux.rs, macos.rs
 ├─ crates/unbihex-ffi/        the engine's C ABI (SPEC §14.1) for the iOS extension: libunbihex.a + include/unbihex.h
 ├─ plugins/tauri-plugin-unbihex-vpn/
-│   ├─ android/               VpnService (Kotlin): brings up the TUN and hands its fd to the engine
+│   ├─ android/               VpnService (Kotlin): brings up the TUN and hands its fd to the engine;
+│   │                         quick settings tile and status notification
 │   └─ ios/                   NETunnelProviderManager (Swift): starts the Packet Tunnel
 ├─ app/
 │   ├─ ui/                    the UI (index.html, styles.css, app.js)
